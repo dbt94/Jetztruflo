@@ -241,14 +241,37 @@ export async function executeInit(options: InitOptions): Promise<InitResult> {
       // the `vector_indexes` table (older CLI / agentdb-written), self-heal it
       // so the statusline vector count + namespace routing work. Best-effort,
       // dynamically imported so a WASM-only host without better-sqlite3 just
-      // skips it. Fresh projects have no DB yet — this is a no-op there.
+      // skips it.
+      //
+      // Persistent memory ON BY DEFAULT: `runtime.memoryBackend` already
+      // defaults to 'hybrid' in DEFAULT_INIT_OPTIONS, but that only ever
+      // configured the DECLARED backend — the actual .swarm/memory.db file
+      // was never created until something eventually called `memory store`
+      // or the user ran `memory init --force` by hand (both the generated
+      // CLAUDE.md and the quickstart docs told users to do this as a
+      // separate step). A fresh project could sit for days looking
+      // "configured for AgentDB" while genuinely capturing nothing, with no
+      // signal that the config and the on-disk reality had diverged. Fresh
+      // projects now get the DB eagerly created here, matching what
+      // `memoryBackend` already promised; MINIMAL_INIT_OPTIONS
+      // (memoryBackend: 'memory') opts out, matching its non-persistent intent.
       try {
         const memDbPath = path.join(targetDir, '.swarm', 'memory.db');
         if (fs.existsSync(memDbPath)) {
           const { repairVectorIndexes } = await import('../memory/memory-initializer.js');
           await repairVectorIndexes(memDbPath, { autoRecover: true });
+        } else if (options.runtime.memoryBackend !== 'memory') {
+          const { initializeMemoryDatabase } = await import('../memory/memory-initializer.js');
+          const initResult = await initializeMemoryDatabase({
+            backend: options.runtime.memoryBackend,
+            dbPath: memDbPath,
+            verbose: false,
+          });
+          if (initResult.success) {
+            result.created.files.push('.swarm/memory.db');
+          }
         }
-      } catch { /* best-effort — never block init on memory repair */ }
+      } catch { /* best-effort — never block init on memory setup */ }
     }
 
     // Generate statusline
@@ -402,7 +425,11 @@ function mergeSettingsForUpgrade(existing: Record<string, unknown>): Record<stri
   // load the ONNX model on every fire (~1s); Claude Code times out and hides
   // the status bar (#2450). The migration replaces the whole command with
   // NEW_STATUSLINE_CMD which invokes the local helper directly via `node -e`.
-  const BROKEN_STATUSLINE_RE = /(?:npx\s+(?:--?\S+\s+)*)?@?claude-flow(?:\/cli)?(?:@\S+)?\s+hooks\s+statusline/;
+  // Flag-list repetition bounded at 10 (real invocations never carry more) —
+  // an unbounded `*` here is exponential-backtracking-prone (CodeQL
+  // js/redos): a crafted settings.json command string with dozens of
+  // dash-token repetitions can hang this check for minutes.
+  const BROKEN_STATUSLINE_RE = /(?:npx\s+(?:--?\S+\s+){0,10})?@?claude-flow(?:\/cli)?(?:@\S+)?\s+hooks\s+statusline/;
   const existingStatusLine = existing.statusLine as Record<string, unknown> | undefined;
   if (existingStatusLine) {
     const existingCmd = typeof existingStatusLine.command === 'string' ? existingStatusLine.command : '';
@@ -423,7 +450,8 @@ function mergeSettingsForUpgrade(existing: Record<string, unknown>): Record<stri
   // We walk each hook event's `hooks[]` and swap any command matching the
   // broken pattern for the local-helper form. Idempotent: re-running this
   // migration on already-correct settings is a no-op.
-  const BROKEN_HOOK_RE = /npx\s+(?:--?\S+\s+)*@?claude-flow\/cli@latest\s+hooks\s+(\S+)/;
+  // Bounded for the same reason as BROKEN_STATUSLINE_RE above (CodeQL js/redos).
+  const BROKEN_HOOK_RE = /npx\s+(?:--?\S+\s+){0,10}@?claude-flow\/cli@latest\s+hooks\s+(\S+)/;
   const localHookCmd = (sub: string): string => {
     // POSIX form mirrors settings-generator.ts::hookCmd() exactly.
     // Windows users hit a separate code path (cmd /c …) — Claude Code on
@@ -520,7 +548,8 @@ export async function executeUpgrade(targetDir: string, upgradeSettings = false)
     // 0. ALWAYS update critical helpers (force overwrite)
     const sourceHelpersForUpgrade = findSourceHelpersDir();
     if (sourceHelpersForUpgrade) {
-      const criticalHelpers = ['auto-memory-hook.mjs', 'hook-handler.cjs', 'intelligence.cjs'];
+      // Keep in sync with helper-refresh.ts:CRITICAL_HELPERS.
+      const criticalHelpers = ['auto-memory-hook.mjs', 'hook-handler.cjs', 'intelligence.cjs', 'statusline.cjs'];
       for (const helperName of criticalHelpers) {
         const targetPath = path.join(targetDir, '.claude', 'helpers', helperName);
         const sourcePath = path.join(sourceHelpersForUpgrade, helperName);
@@ -651,7 +680,7 @@ export async function executeUpgrade(targetDir: string, upgradeSettings = false)
         initialized: new Date().toISOString(),
         status: 'PENDING',
         cvesFixed: 0,
-        totalCves: 3,
+        totalCves: 0,
         lastScan: null,
         _note: 'Run: npx @claude-flow/cli@latest security scan'
       };
@@ -900,7 +929,7 @@ async function writeSettings(
  * "same MCP server twice under two different prefixes" duplication the
  * issue describes.
  *
- * Returns the path of the file that already declares `ruflo` (so we can
+ * Returns the path of the file that already declares `ruflo`/`claude-flow` (so we can
  * surface it in the skipped-message), or null if none found.
  */
 function detectExistingRufloMCP(targetDir: string): string | null {
@@ -931,10 +960,9 @@ function detectExistingRufloMCP(targetDir: string): string | null {
       const parsed = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
       if (!parsed || typeof parsed !== 'object') continue;
       // (a) Top-level mcpServers (legacy / global form).
-      // #2207: accept BOTH the old 'ruflo' key AND the new 'claude-flow' key so that
-      // a prior install with either key is correctly detected as already-initialized.
-      // This also avoids the reverse problem: after #2206 fixed the generator to write
-      // 'claude-flow', a second `ruflo init` must still recognise the existing install.
+      // Accept BOTH names so init does not add a second server for the same
+      // binary when a project carries a pre-rename `claude-flow` registration
+      // and the current generator would write `ruflo` (#2612).
       if (parsed.mcpServers && typeof parsed.mcpServers === 'object') {
         const servers = parsed.mcpServers as Record<string, unknown>;
         // #2369: also recognise the legacy dist-tag keys generated by
@@ -951,10 +979,9 @@ function detectExistingRufloMCP(targetDir: string): string | null {
       }
       // (b) #1840: Claude Code project-scoped registrations under
       //     parsed.projects[<projectPath>].mcpServers. Match by
-      //     normalized path against targetDir or any of its ancestors so
-      //     a `claude mcp add claude-flow` (or legacy `ruflo`) in this repo is
+      //     normalized path against targetDir or any of its ancestors so an
+      //     existing `claude-flow` or `ruflo` registration in this repo is
       //     detected even when Claude stored the key with different casing/slash style.
-      // #2207: accept both keys here too.
       if (parsed.projects && typeof parsed.projects === 'object') {
         for (const [projectKey, projectVal] of Object.entries(parsed.projects)) {
           if (!projectVal || typeof projectVal !== 'object') continue;
@@ -1024,16 +1051,18 @@ async function writeMCPConfig(
     return;
   }
 
-  // #1779 — Skip writing if the user already has a `ruflo`-keyed MCP
-  // server registered elsewhere (parent .mcp.json, ~/.claude.json, etc).
-  // Writing our `claude-flow`-keyed entry on top of that produces the
-  // duplicate-registration the issue describes (~250 duplicate tools).
-  // Force-mode (`--force`) bypasses this guard for users who actually
-  // want both registrations.
+  // #1779/#2612 — Skip writing if the user already has this MCP server
+  // registered elsewhere (parent .mcp.json, ~/.claude.json, etc). The
+  // canonical key is `claude-flow` (per #2206 — matches mcp__claude-flow__*
+  // plugin tool refs); a stray `ruflo`-keyed entry pointing at the same
+  // binary is the legacy-duplicate form that #2612 healed. Writing our
+  // fresh `claude-flow` entry on top of either variant starts the same
+  // binary twice under two tool namespaces. Force-mode (`--force`)
+  // bypasses this guard for users who actually want both registrations.
   if (!options.force) {
     const existingRufloPath = detectExistingRufloMCP(targetDir);
     if (existingRufloPath) {
-      result.skipped.push(`.mcp.json (existing 'ruflo' MCP registration found at ${existingRufloPath} — would create duplicate; pass --force to write anyway)`);
+      result.skipped.push(`.mcp.json (existing ruflo/claude-flow MCP registration found at ${existingRufloPath} — would create duplicate; pass --force to write anyway)`);
       return;
     }
   }
@@ -1656,7 +1685,7 @@ async function writeInitialMetrics(
       initialized: new Date().toISOString(),
       status: 'PENDING',
       cvesFixed: 0,
-      totalCves: 3,
+      totalCves: 0,
       lastScan: null,
       _note: 'Run: npx @claude-flow/cli@latest security scan'
     };
@@ -2032,7 +2061,7 @@ npx @claude-flow/cli@latest hive-mind consensus --propose "task"
 ### MCP Server Setup
 \`\`\`bash
 # Add Ruflo MCP
-claude mcp add ruflo -- npx -y ruflo@latest
+claude mcp add ruflo -- npx -y ruflo@latest mcp start
 
 # Optional servers
 claude mcp add ruv-swarm -- npx -y ruv-swarm mcp start

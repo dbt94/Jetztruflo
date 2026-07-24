@@ -87,9 +87,9 @@
     },
     {
       "id": "ADR-104-transport",
-      "desc": "Federation plugin wires real wire transport via agentic-flow/transport/loader (loadQuicTransport). plugin.ts loads transport in initialize(), binds optional listener on config.port, closes on shutdown. sendToNode now does real ws send to peer endpoint resolved via discovery.getPeer. Validated mac\u2194ruvultra over tailscale (150ms real send).",
+      "desc": "Federation plugin wires wire transport via loadFederationTransport (midstream-aware loader in src/transport/midstream-aware-loader.ts). agentic-flow is an OPTIONAL peer dep \u2014 when its transport/loader subpath is unavailable, the loader falls back to WebSocket via the plugin's bundled midstream-aware path. Verified locally: mac\u2194ruvultra 150ms real send.",
       "file": "v3/@claude-flow/plugin-agent-federation/dist/plugin.js",
-      "marker": "agentic-flow/transport/loader"
+      "marker": "loadFederationTransport"
     },
     {
       "id": "ADR-109-inbound-dispatch",
@@ -201,9 +201,9 @@
     },
     {
       "id": "#1921-shim",
-      "desc": "scripts/ruflo-hook.sh \u2014 resilient invoker shipped in each plugin (.claude-plugin/, plugin/, plugins/ruflo-core/): prefers a local `ruflo`/`claude-flow` binary, else `npx --prefer-offline --yes ruflo@alpha`, always `exit 0`. stdin (hook event JSON) passes through unchanged. Companion to #1921.",
+      "desc": "scripts/ruflo-hook.sh \u2014 resilient invoker shipped in each plugin (.claude-plugin/, plugin/, plugins/ruflo-core/): prefers a local `ruflo`/`claude-flow` binary, else `npx --prefer-offline --yes ruflo@latest`, always `exit 0`. stdin (hook event JSON) passes through unchanged. Companion to #1921.",
       "file": "plugins/ruflo-core/scripts/ruflo-hook.sh",
-      "marker": "npx --prefer-offline --yes ruflo@alpha hooks"
+      "marker": "npx --prefer-offline --yes ruflo@latest hooks"
     },
     {
       "id": "#1927",

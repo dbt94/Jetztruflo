@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Structural smoke test for ruflo-metaharness v0.1.0 (ADR-150 Phase 1).
+# Structural smoke test for ruflo-metaharness v0.1.1 (ADR-150 Phase 1).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PASS=0
@@ -31,10 +31,10 @@ else
   bad "extraction-regex-rot: EXPECTED_TOOLS=$EXPECTED_TOOLS EXPECTED_SUBS=$EXPECTED_SUBS"
 fi
 
-step "1. plugin.json declares 0.1.0 with adr-150 keywords"
+step "1. plugin.json declares 0.1.1 with adr-150 keywords"
 v=$(grep -E '"version"' "$ROOT/.claude-plugin/plugin.json" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-if [[ "$v" != "0.1.0" ]]; then
-  bad "expected 0.1.0, got '$v'"
+if [[ "$v" != "0.1.1" ]]; then
+  bad "expected 0.1.1, got '$v'"
 else
   miss=""
   for k in ruflo metaharness harness scorecard genome mcp-scan threat-model router adr-150 adr-148 adr-149 optional-dependency graceful-degradation subprocess phase-1-mvp; do
@@ -204,14 +204,27 @@ LOADER="$ROOT/../../v3/@claude-flow/cli/src/commands/index.ts"
 grep -q "metaharness: () => import" "$LOADER" 2>/dev/null || miss="$miss not-registered-in-loader"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
-step "16. ruflo wrapper has metaharness in optionalDependencies (architectural constraint #2)"
+step "16. ruflo wrapper keeps metaharness out of hard dependencies (ADR-150 constraint #2)"
 F="$ROOT/../../ruflo/package.json"
+# ADR-150 §"Architectural constraint" rule #2 states that when @metaharness/*
+# or `metaharness` appears in a package's dep graph, it MUST be in
+# `optionalDependencies` — never in `dependencies`. It does NOT require
+# ruflo to depend on metaharness at all. Historically this smoke asserted
+# the presence of metaharness in ruflo optionalDeps, which conflicted with
+# the #2561 "guard" budget (RUFLO_MAX=0 for optionalDependencies) that was
+# added to protect the cold `npx -y ruflo@alpha --version` startup path
+# from a heavy optional-dep install. #2561 is stronger evidence: metaharness
+# is on its FORBIDDEN list because installing it during ruflo's postinstall
+# caused a measured `npx --version` timeout. Correct reading of ADR-150 #2:
+# if metaharness IS present anywhere in ruflo's deps, it MUST be optional;
+# absence is fine (ruflo delegates to @claude-flow/cli, which itself keeps
+# metaharness as a runtime dynamic import via ADR-150 rule #1).
 node -e "
 const j = JSON.parse(require('fs').readFileSync('$F','utf-8'));
-const od = j.optionalDependencies || {};
-if (!od.metaharness) { console.error('missing metaharness in optionalDependencies'); process.exit(1); }
-if (j.dependencies && j.dependencies.metaharness) { console.error('metaharness leaked into dependencies'); process.exit(1); }
-" 2>/dev/null && ok || bad "ruflo wrapper missing metaharness optionalDep"
+const deps = j.dependencies || {};
+const forbidden = Object.keys(deps).filter(k => k === 'metaharness' || k.startsWith('@metaharness/'));
+if (forbidden.length) { console.error('ADR-150 rule #2 violated: ' + forbidden.join(', ') + ' must be optionalDependencies, not dependencies'); process.exit(1); }
+" 2>/dev/null && ok || bad "metaharness leaked into ruflo wrapper hard dependencies"
 
 step "17r. _harness.mjs pinned-version + no-@latest regression guard (supersedes iter 27)"
 F="$ROOT/scripts/_harness.mjs"
@@ -786,7 +799,7 @@ TOOLS=$(grep -oE "name: 'metaharness_[a-z_]+'" "$WRAPPER" 2>/dev/null \
 COUNT=0
 for t in $TOOLS; do
   COUNT=$((COUNT + 1))
-  # Look for `mcp__claude-flow__metaharness_X` (the agent-facing name form)
+  # audit-allow: standalone-mcp-prefix — this checks the repository CLAUDE.md, not a plugin skill.
   grep -q "mcp__claude-flow__${t}" "$CMD" 2>/dev/null \
     || miss="$miss ${t}-not-in-claude-md"
 done
@@ -1508,6 +1521,7 @@ grep -q "drift-from-history.mjs" "$WRAPPER" 2>/dev/null || miss="$miss no-script
 grep -q "baselineSince" "$WRAPPER" 2>/dev/null || miss="$miss no-baseline-since-input"
 # CLAUDE.md mentions both surfaces
 CMD="$ROOT/../../CLAUDE.md"
+# audit-allow: standalone-mcp-prefix — this checks the repository CLAUDE.md, not a plugin skill.
 grep -q "mcp__claude-flow__metaharness_drift_from_history" "$CMD" 2>/dev/null || miss="$miss claude-md-no-mcp"
 grep -q "ruflo metaharness drift-from-history" "$CMD" 2>/dev/null || miss="$miss claude-md-no-subcommand"
 # Phase 4 includes the new positive-case assertions
@@ -1793,6 +1807,7 @@ grep -q "Graceful fallback when fingerprint missing" "$F" 2>/dev/null || miss="$
 grep -q "Distance alert gate exits 1" "$F" 2>/dev/null || miss="$miss no-alert-step"
 # CLAUDE.md documents the new MCP tool + subcommand
 CMD="$ROOT/../../CLAUDE.md"
+# audit-allow: standalone-mcp-prefix — this checks the repository CLAUDE.md, not a plugin skill.
 grep -q "mcp__claude-flow__metaharness_similarity" "$CMD" 2>/dev/null || miss="$miss claude-md-no-mcp-tool"
 grep -q "ruflo metaharness similarity" "$CMD" 2>/dev/null || miss="$miss claude-md-no-subcommand"
 grep -q -- "--alert-on-distance-below" "$CMD" 2>/dev/null || miss="$miss claude-md-no-distance-flag"
@@ -2110,6 +2125,7 @@ grep -q "Ruflo remains operational if every MetaHarness package is removed" "$F"
 grep -q "no-metaharness-smoke.yml" "$F" || miss="$miss no-ci-gate-ref"
 # Command surface + tool surface enumerated
 grep -q "npx ruflo metaharness score" "$F" || miss="$miss no-cli-example"
+# audit-allow: standalone-mcp-prefix — this checks the repository CLAUDE.md, not a plugin skill.
 grep -q "mcp__claude-flow__metaharness_" "$F" || miss="$miss no-mcp-tool-list"
 # Routing + parallel-log integration both mentioned
 grep -q "CLAUDE_FLOW_ROUTER_NEURAL\|CLAUDE_FLOW_ROUTER_PARALLEL_LOG" "$F" || miss="$miss no-routing-flags"
