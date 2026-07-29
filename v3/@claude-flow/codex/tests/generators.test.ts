@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import * as TOML from '@iarna/toml';
 import {
   generateAgentsMd,
   generateSkillMd,
@@ -15,6 +16,8 @@ import {
   generateMinimalConfigToml,
   generateCIConfigToml,
 } from '../src/generators/config-toml.js';
+import { resolveBundledSkillsPath } from '../src/initializer.js';
+import { existsSync } from 'node:fs';
 import type {
   AgentsMdOptions,
   SkillMdOptions,
@@ -26,6 +29,12 @@ import type {
 // =============================================================================
 
 describe('generateAgentsMd', () => {
+  it('resolves built-in skills inside the Codex package', () => {
+    const skillsPath = resolveBundledSkillsPath();
+    expect(skillsPath).toMatch(/[\\/]@claude-flow[\\/]codex[\\/]\.agents[\\/]skills$/);
+    expect(existsSync(skillsPath)).toBe(true);
+  });
+
   describe('minimal template', () => {
     it('should generate a minimal AGENTS.md with required sections', async () => {
       const options: AgentsMdOptions = {
@@ -111,6 +120,18 @@ describe('generateAgentsMd', () => {
       expect(result).toContain('## Code Standards');
       expect(result).toContain('## Security');
       expect(result).toContain('## Memory System');
+      expect(result).toContain('## Ruflo + Codex Automated Workflow');
+      expect(result).toContain('If it is not registered, use compatible');
+      expect(result).toContain('Never allow two writers in one worktree');
+      expect(result).toContain('MetaHarness may benchmark candidates concurrently');
+      expect(result).toContain('### Repository harness adapter');
+      expect(result).toContain(
+        'A repository lease coordinates ownership; it does not grant authorization',
+      );
+      expect(result).toContain(
+        'HEAD alone is not an exact source-state',
+      );
+      expect(result).not.toContain('Co-Authored-By: ruflo-bot');
     });
 
     it('should include tech stack', async () => {
@@ -189,9 +210,26 @@ describe('generateAgentsMd', () => {
 
       const result = await generateAgentsMd(options);
 
-      expect(result).toContain('Co-Authored-By: ruflo-bot');
+      expect(result).not.toContain('Co-Authored-By: ruflo-bot');
+      expect(result).toContain('unless the repository explicitly');
       expect(result).toContain('feat');
       expect(result).toContain('fix');
+    });
+  });
+
+  describe('policy and swarm automation config', () => {
+    it('generates safe backward-compatible policy and bounded concurrency defaults', async () => {
+      const result = await generateConfigToml({});
+      expect(result).toContain('[policy]');
+      expect(result).toContain('mode = "legacy"');
+      expect(result).toContain('[swarm.automation]');
+      expect(result).toContain('enabled = false');
+      expect(result).toContain('max_concurrent = 4');
+      expect(result).toContain('max_writers = 2');
+      expect(result).toContain('worktree_isolation = true');
+      expect(result).toContain('[profiles.dev]');
+      expect(result).toContain('approval_policy = "on-request"');
+      expect(result).toContain('sandbox_mode = "workspace-write"');
     });
   });
 
@@ -607,6 +645,19 @@ describe('generateBuiltInSkill', () => {
 // =============================================================================
 
 describe('generateConfigToml', () => {
+  it('keeps Codex settings at the TOML root', async () => {
+    const parsed = TOML.parse(await generateConfigToml({
+      model: 'gpt-test',
+      approvalPolicy: 'on-request',
+      sandboxMode: 'workspace-write',
+    })) as Record<string, unknown>;
+    expect(parsed.model).toBe('gpt-test');
+    expect(parsed.approval_policy).toBe('on-request');
+    expect(parsed.sandbox_mode).toBe('workspace-write');
+    expect((parsed.policy as Record<string, unknown>).mode).toBe('legacy');
+    expect(((parsed.swarm as Record<string, unknown>).automation as Record<string, unknown>).enabled).toBe(false);
+  });
+
   describe('default configuration', () => {
     it('should generate valid TOML with header', async () => {
       const result = await generateConfigToml({ platform: 'linux' });
@@ -650,7 +701,7 @@ describe('generateConfigToml', () => {
 
       expect(result).toContain('[mcp_servers.ruflo]');
       expect(result).toContain('command = "npx"');
-      expect(result).toContain(`args = ["-y", "--package=@claude-flow/cli@latest", "claude-flow-mcp"]`);
+      expect(result).toContain(`args = ["-y", "ruflo@latest", "mcp", "start"]`);
       expect(result).toContain('enabled = true');
     });
 
@@ -658,8 +709,8 @@ describe('generateConfigToml', () => {
       const result = await generateConfigToml();
 
       expect(result).toContain('[profiles.dev]');
-      expect(result).toContain('approval_policy = "never"');
-      expect(result).toContain('sandbox_mode = "danger-full-access"');
+      expect(result).toContain('approval_policy = "on-request"');
+      expect(result).toContain('sandbox_mode = "workspace-write"');
 
       expect(result).toContain('[profiles.safe]');
       expect(result).toContain('sandbox_mode = "read-only"');
